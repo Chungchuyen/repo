@@ -1,6 +1,6 @@
 {
-    "latestVersionCode": 13,
-    "latestVersionName": "1.1.3",
-    "releaseNotes": "- Fix play phim HH3D\n- Thêm trượt để tua phim\n- Thêm login tài khoản để đồng bộ yêu thích và lịch sử xem",
-    "downloadUrl": "https://raw.githubusercontent.com/youngbi/repo/main/app-release.apk"
+    "latestVersionCode": 18,
+    "latestVersionName": "1.1.8",
+    "releaseNotes": "- Tối ưu cho Mobile, Tablet, Android TV\n- Thêm nhiều server phim hơn\n- Fix các bug anh em báo :D",
+    "downloadUrl": "https://stpaulclinic.vn/vaapp/app-release.apk"
 }
