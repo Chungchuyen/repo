@@ -201,29 +201,46 @@ function parseMovieDetail(htmlResponse) {
         var linkRegex = /<a href="https?:\/\/clbphimxua\.com\/clbpx\.html\?v=([a-zA-Z0-9_-]+)"[^>]*>(?:.*?Tập (\d+)|.*?<img.*?play.*?>|.*?)<\/a>/gi;
         var matches;
 
-        // Single movie check
-        var playBtnRegex = /<a href="https?:\/\/clbphimxua\.com\/clbpx\.html\?v=([a-zA-Z0-9_-]+)"[^>]*><img.*?src=.*?play.*?><\/a>/gi;
-
-        // It seems many posts just use line breaks and 'Tập 1, Tập 2' texts or inline a tags. Let's do a generic match for those wrapper a's.
-        var allLinksRegex = /<a href="https?:\/\/clbphimxua\.com\/clbpx\.html\?v=([a-zA-Z0-9_-]+)"[^>]*>(?:<img.*?play.*?>)?(.*?)<\/a>/gi;
+        // Check for episodes list
+        var allLinksRegex = /<a href="(https?:\/\/clbphimxua\.com\/clbpx\.html\?v=[a-zA-Z0-9_-]+)"[^>]*>(?:.*?Tập (\d+)|.*?<img.*?play.*?>|.*?)<\/a>/gi;
         var lMatch;
         var epCount = 1;
         while ((lMatch = allLinksRegex.exec(htmlResponse)) !== null) {
-            var epId = lMatch[1];
-            var epLabel = lMatch[2].replace(/<[^>]+>/g, '').trim();
-            if (!epLabel || epLabel.length === 0) {
-                epLabel = "Tập " + epCount;
+            var epUrl = lMatch[1];
+            var epLabel = "";
+
+            // Try extracting from the tag text if not matching the play image
+            if (lMatch[0].indexOf('<img') === -1) {
+                epLabel = lMatch[0].replace(/<[^>]+>/g, '').trim();
             }
 
-            // Extract the CLBPhimXua iframe directly
-            var epUrl = "https://clbphimxua.com/clbpx.html?v=" + epId;
+            if (!epLabel || epLabel.length === 0) {
+                if (lMatch[2]) {
+                    epLabel = "Tập " + lMatch[2];
+                } else {
+                    epLabel = "Phim";
+                }
+            }
 
             episodes.push({
                 id: epUrl, // WebView will load this
                 name: epLabel,
-                slug: epId
+                slug: epUrl
             });
             epCount++;
+        }
+
+        if (episodes.length === 0) {
+            // Fallback single play button
+            var playBtnRegex = /<a href="(https?:\/\/clbphimxua\.com\/clbpx\.html\?v=[a-zA-Z0-9_-]+)"[^>]*><img.*?src=.*?play.*?><\/a>/gi;
+            var sMatch;
+            while ((sMatch = playBtnRegex.exec(htmlResponse)) !== null) {
+                episodes.push({
+                    id: sMatch[1],
+                    name: "Phim",
+                    slug: sMatch[1]
+                });
+            }
         }
 
         if (episodes.length > 0) {
