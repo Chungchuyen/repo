@@ -33,7 +33,7 @@ Là danh sách (Menu) các Plugin để người dùng nhìn thấy trong phần
 
 ---
 
-## 2. Cách Viết Một Sinh Ra Một File Plugin (File `.js`) ⚛️
+## 2. Cách Viết Một File Plugin (File `.js`) ⚛️
 
 Mã JS không sử dụng các thư viện như jQuery. Tất cả là Vanilla JS. Nhiệm vụ chính của một script là nhận một yêu cầu từ Ứng dụng (Android) và trả về một chuỗi `JSON`. Hệ sinh thái Script có 3 nhóm hàm chính:
 
