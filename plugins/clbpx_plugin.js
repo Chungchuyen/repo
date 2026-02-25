@@ -127,7 +127,7 @@ function parseListResponse(htmlResponse) {
         }
 
         items.push({
-            id: link, // We store original link id as custom full URL because its easy
+            id: slug, // Use slug, not full URL, so cross-source lookups work
             title: title.trim(),
             posterUrl: thumb,
             backdropUrl: thumb,
@@ -176,10 +176,19 @@ function parseMovieDetail(htmlResponse) {
         // Convert html entities
         title = title.replace(/&#8211;/g, '-').replace(/&#8217;/g, "'");
 
-        var posterMatch = htmlResponse.match(/<img.*?class="attachment-full size-full.*?src="([^"]+)"/i);
+        // Try wp-post-image class first (most reliable for WordPress)
+        var posterMatch = htmlResponse.match(/<img[^>]*class="[^"]*wp-post-image[^"]*"[^>]*src="([^"]+)"/i);
+        if (!posterMatch) {
+            // Try src before class
+            posterMatch = htmlResponse.match(/<img[^>]*src="([^"]+)"[^>]*class="[^"]*wp-post-image[^"]*"/i);
+        }
+        if (!posterMatch) {
+            // Fallback: image inside figure inside article
+            posterMatch = htmlResponse.match(/<article[^>]*>[\s\S]*?<figure>\s*<img[^>]*src="([^"]+)"/i);
+        }
         if (posterMatch) posterUrl = posterMatch[1];
         else {
-            // Fallback
+            // Last fallback: og:image
             var ogImg = htmlResponse.match(/<meta property="og:image" content="([^"]+)"/i);
             if (ogImg) posterUrl = ogImg[1];
         }
