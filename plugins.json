@@ -25,7 +25,7 @@
         {
             "id": "phimhdcs",
             "name": "PhimHDCS",
-            "version": "1.0.2",
+            "version": "1.0.3",
             "scriptUrl": "https://raw.githubusercontent.com/youngbi/repo/main/plugins/phimhdcs_plugin.js",
             "iconUrl": "https://phimhdcs.com/favicon.ico"
         },
