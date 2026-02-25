@@ -6,7 +6,7 @@ function getManifest() {
     return JSON.stringify({
         "id": "phimhdcs",
         "name": "PhimHDCS",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "baseUrl": "https://phimhdcs.com",
         "iconUrl": "https://phimhdcs.com/favicon.ico",
         "isEnabled": true,
@@ -420,13 +420,13 @@ function parseMovieDetail(htmlContent) {
     }
 }
 
-function parseDetailResponse(htmlContent) {
+function parseDetailResponse(htmlContent, pageUrl) {
     try {
         var decodeBase64 = function (str) {
             try {
                 var lookup = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
                 var result = '';
-                str = String(str).replace(/[^A-Za-z0-9+\/]/g, '');
+                str = String(str).replace(/[^A-Za-z0-9+\/=]/g, '');
                 var len = str.length;
                 for (var i = 0; i < len; i += 4) {
                     var a = lookup.indexOf(str.charAt(i));
@@ -452,7 +452,80 @@ function parseDetailResponse(htmlContent) {
             });
         };
 
-        // --- Step 1: Extract episode ID (flexible: var/let/const, episode/episode_id, quoted or not) ---
+        // Helper: decode chunks with salt removal → base64 decode
+        var decodeChunksWithSalt = function (chunks, saltString) {
+            var revBase64 = chunks.join('');
+            var base64 = revBase64.split('').reverse().join('');
+            if (saltString) base64 = base64.replace(saltString, '');
+            return decodeBase64(base64);
+        };
+
+        // --- Extract salt (_0xS) used across all methods ---
+        var saltMatch = /(?:const|let|var)\s+_0xS\s*=\s*["']([^"']+)["']/.exec(htmlContent);
+        var saltString = saltMatch ? saltMatch[1] : "";
+
+        // =====================================================================
+        // NEW METHOD: _0xData + _0xS + curId pattern (current PhimHDCS format)
+        // =====================================================================
+        var dataMatch = /(?:const|let|var)\s+_0xData\s*=\s*(\{[\s\S]*?\})\s*;/.exec(htmlContent);
+        if (dataMatch) {
+            // Extract curId (current episode ID)
+            var curIdMatch = /(?:const|let|var)\s+curId\s*=\s*['"](\d+)['"]/.exec(htmlContent);
+            var curId = curIdMatch ? curIdMatch[1] : null;
+
+            try {
+                // Balanced brace extraction for proper JSON
+                var startIdx = dataMatch.index + dataMatch[0].indexOf('{');
+                var braceCount = 0;
+                var jsonEnd = -1;
+                for (var j = startIdx; j < htmlContent.length && j < startIdx + 100000; j++) {
+                    if (htmlContent[j] === '{') braceCount++;
+                    else if (htmlContent[j] === '}') {
+                        braceCount--;
+                        if (braceCount === 0) { jsonEnd = j + 1; break; }
+                    }
+                }
+                if (jsonEnd > 0) {
+                    var jsonStr = htmlContent.substring(startIdx, jsonEnd);
+                    var oxData = JSON.parse(jsonStr);
+
+                    // Determine which key to use: curId, or extract from pageUrl, or first key
+                    var targetId = curId;
+
+                    // Fallback: extract episode ID from page URL (e.g. tap-1-747762 → 747762)
+                    if (!targetId && pageUrl) {
+                        var urlIdMatch = /(\d{5,})(?:\?|$|#)/.exec(pageUrl);
+                        if (!urlIdMatch) urlIdMatch = /-(\d{5,})$/.exec(pageUrl);
+                        if (urlIdMatch && oxData[urlIdMatch[1]]) {
+                            targetId = urlIdMatch[1];
+                        }
+                    }
+
+                    // Fallback: use first key
+                    if (!targetId) {
+                        var keys = [];
+                        for (var k in oxData) { if (oxData.hasOwnProperty(k)) keys.push(k); }
+                        if (keys.length > 0) targetId = keys[0];
+                    }
+
+                    if (targetId && oxData[targetId] && Array.isArray(oxData[targetId])) {
+                        var chunks = oxData[targetId];
+                        console.log('PHIMHDCS_DEBUG _0xData: targetId=' + targetId + ', chunks=' + chunks.length + ', salt=' + saltString);
+                        var playerUrl = decodeChunksWithSalt(chunks, saltString);
+                        console.log('PHIMHDCS_DEBUG _0xData decoded: ' + playerUrl);
+                        if (playerUrl && playerUrl.indexOf('http') === 0) {
+                            return makeResult(playerUrl);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log('PHIMHDCS_DEBUG _0xData parse error: ' + e);
+            }
+        }
+
+        // =====================================================================
+        // LEGACY METHOD: episode var + serverLinksChunks (old PhimHDCS format)
+        // =====================================================================
         var currentEpId = null;
         var epPatterns = [
             /(?:var|let|const)\s+episode\s*=\s*'(\d+)'/i,
@@ -464,7 +537,7 @@ function parseDetailResponse(htmlContent) {
         ];
         for (var i = 0; i < epPatterns.length; i++) {
             var epMatch = epPatterns[i].exec(htmlContent);
-            if (epMatch) { currentEpId = epMatch[1]; console.log('PHIMHDCS_DEBUG Step1: epId=' + currentEpId + ' pattern=' + i); break; }
+            if (epMatch) { currentEpId = epMatch[1]; break; }
         }
 
         // Fallback: extract data-id from active streaming-server button
@@ -474,7 +547,6 @@ function parseDetailResponse(htmlContent) {
             if (activeMatch) currentEpId = activeMatch[1];
         }
 
-        // --- Step 2: Try serverLinksChunks (flexible: var/let/const) ---
         if (currentEpId) {
             var chunksPatterns = [
                 /(?:var|let|const)\s+serverLinksChunks\s*=\s*(\{[\s\S]*?\})\s*;/i,
@@ -485,34 +557,24 @@ function parseDetailResponse(htmlContent) {
                 var chunksMatch = chunksPatterns[ci].exec(htmlContent);
                 if (chunksMatch) {
                     try {
-                        // Try balanced brace extraction for proper JSON
-                        var startIdx = chunksMatch.index + chunksMatch[0].indexOf('{');
-                        var braceCount = 0;
-                        var jsonEnd = -1;
-                        for (var j = startIdx; j < htmlContent.length && j < startIdx + 50000; j++) {
-                            if (htmlContent[j] === '{') braceCount++;
-                            else if (htmlContent[j] === '}') {
-                                braceCount--;
-                                if (braceCount === 0) { jsonEnd = j + 1; break; }
+                        var startIdx2 = chunksMatch.index + chunksMatch[0].indexOf('{');
+                        var braceCount2 = 0;
+                        var jsonEnd2 = -1;
+                        for (var j2 = startIdx2; j2 < htmlContent.length && j2 < startIdx2 + 50000; j2++) {
+                            if (htmlContent[j2] === '{') braceCount2++;
+                            else if (htmlContent[j2] === '}') {
+                                braceCount2--;
+                                if (braceCount2 === 0) { jsonEnd2 = j2 + 1; break; }
                             }
                         }
-                        if (jsonEnd > 0) {
-                            var jsonStr = htmlContent.substring(startIdx, jsonEnd);
-                            var serverLinksChunks = JSON.parse(jsonStr);
-                            var chunks = serverLinksChunks[currentEpId];
-                            if (chunks && Array.isArray(chunks)) {
-                                console.log('PHIMHDCS_DEBUG Step2: chunks count=' + chunks.length + ', first=' + (chunks[0] || '').substring(0, 50));
-                                var revBase64 = chunks.join('');
-                                var saltMatch = /(?:const|let|var)\s+_0xS\s*=\s*["']([^"']+)["']/.exec(htmlContent);
-                                var saltString = saltMatch ? saltMatch[1] : "";
-                                console.log('PHIMHDCS_DEBUG Step2: revBase64 len=' + revBase64.length + ', salt=' + saltString);
-                                var base64 = revBase64.split('').reverse().join('');
-                                if (saltString) base64 = base64.replace(saltString, '');
-                                console.log('PHIMHDCS_DEBUG Step2: base64 first50=' + base64.substring(0, 50));
-                                var playerUrl = decodeBase64(base64);
-                                console.log('PHIMHDCS_DEBUG Step2: decoded=' + playerUrl);
-                                if (playerUrl && playerUrl.indexOf('http') === 0) {
-                                    return makeResult(playerUrl);
+                        if (jsonEnd2 > 0) {
+                            var jsonStr2 = htmlContent.substring(startIdx2, jsonEnd2);
+                            var serverLinksChunks = JSON.parse(jsonStr2);
+                            var chunks2 = serverLinksChunks[currentEpId];
+                            if (chunks2 && Array.isArray(chunks2)) {
+                                var playerUrl2 = decodeChunksWithSalt(chunks2, saltString);
+                                if (playerUrl2 && playerUrl2.indexOf('http') === 0) {
+                                    return makeResult(playerUrl2);
                                 }
                             }
                         }
@@ -520,46 +582,36 @@ function parseDetailResponse(htmlContent) {
                 }
             }
 
-            // --- Step 3: Search for data-id as a JSON key anywhere in page ---
+            // Search for data-id as a JSON key anywhere in page
             var keyPattern = new RegExp('"' + currentEpId + '"\\s*:\\s*\\[([^\\]]+)\\]');
             var keyMatch = keyPattern.exec(htmlContent);
             if (keyMatch) {
                 try {
                     var arrStr = '[' + keyMatch[1] + ']';
-                    var chunks = JSON.parse(arrStr);
-                    if (chunks && Array.isArray(chunks)) {
-                        console.log('PHIMHDCS_DEBUG Step3: chunks count=' + chunks.length + ', first=' + (chunks[0] || '').substring(0, 50));
-                        var revBase64 = chunks.join('');
-                        var saltMatch = /(?:const|let|var)\s+_0xS\s*=\s*["']([^"']+)["']/.exec(htmlContent);
-                        var saltString = saltMatch ? saltMatch[1] : "";
-                        console.log('PHIMHDCS_DEBUG Step3: revBase64 len=' + revBase64.length + ', salt=' + saltString);
-                        var base64 = revBase64.split('').reverse().join('');
-                        if (saltString) base64 = base64.replace(saltString, '');
-                        console.log('PHIMHDCS_DEBUG Step3: base64 first50=' + base64.substring(0, 50));
-                        var playerUrl = decodeBase64(base64);
-                        console.log('PHIMHDCS_DEBUG Step3: decoded=' + playerUrl);
-                        if (playerUrl && playerUrl.indexOf('http') === 0) {
-                            return makeResult(playerUrl);
+                    var chunks3 = JSON.parse(arrStr);
+                    if (chunks3 && Array.isArray(chunks3)) {
+                        var playerUrl3 = decodeChunksWithSalt(chunks3, saltString);
+                        if (playerUrl3 && playerUrl3.indexOf('http') === 0) {
+                            return makeResult(playerUrl3);
                         }
                     }
                 } catch (e) { }
             }
         }
 
-        // --- Step 4: Fallback to data-link attribute (if exists in HTML) ---
+        // --- Fallback: data-link attribute ---
         var serverMatch = /<a[^>]+class="[^"]*active[^"]*"[^>]*data-link="([^"]+)"/i.exec(htmlContent);
         if (!serverMatch) serverMatch = /<a[^>]+data-link="([^"]+)"[^>]*class="[^"]*active[^"]*"/i.exec(htmlContent);
         if (!serverMatch) serverMatch = /<a[^>]*data-link="([^"]+)"/i.exec(htmlContent);
 
         if (serverMatch) {
-            var playerUrl = serverMatch[1].trim();
-            if (playerUrl && playerUrl.indexOf('${link}') === -1 && playerUrl.indexOf('http') === 0) {
-                return makeResult(playerUrl);
+            var playerUrl4 = serverMatch[1].trim();
+            if (playerUrl4 && playerUrl4.indexOf('${link}') === -1 && playerUrl4.indexOf('http') === 0) {
+                return makeResult(playerUrl4);
             }
         }
 
-        // Fallback: return the episode page URL itself — WebView will load the full page
-        // and the page's own JS will render the embed player in #player div
+        // Final fallback: return empty → PlayerViewModel will use WebView with episode page URL
         return "{}";
     } catch (error) { return "{}"; }
 }
