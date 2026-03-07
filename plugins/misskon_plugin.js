@@ -1,341 +1,254 @@
-// =============================================================================
-// CONFIGURATION & METADATA
-// =============================================================================
+"""
+Scraper dữ liệu phim từ phimmoichill
+Cào thông tin: tên phim, thể loại, năm, rating, mô tả, link
+"""
 
-function getManifest() {
-    return JSON.stringify({
-        "id": "misskon",
-        "name": "MissKon",
-        "version": "1.0.0",
-        "baseUrl": "https://misskon.com",
-        "iconUrl": "https://misskon.com/favicon.ico",
-        "isEnabled": true,
-        "isAdult": true,
-        "type": "MANGA",
-        "layoutType": "HORIZONTAL"
-    });
+import requests
+from bs4 import BeautifulSoup
+import json
+import csv
+import time
+import re
+from urllib.parse import urljoin, urlparse
+from dataclasses import dataclass, asdict
+from typing import Optional
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
+
+BASE_URL = "https://phimmoichill.you"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": BASE_URL,
 }
 
-function getHomeSections() {
-    return JSON.stringify([
-        { slug: 'top3', title: 'Top 3', type: 'Horizontal', path: '' },
-        { slug: 'top7', title: 'Top 7', type: 'Horizontal', path: '' },
-        { slug: 'top30', title: 'Top 30', type: 'Horizontal', path: '' },
-        { slug: 'top60', title: 'Top 60', type: 'Horizontal', path: '' },
-        { slug: '', title: 'Mới Cập Nhật', type: 'Grid', path: '' }
-    ]);
-}
 
-function getPrimaryCategories() {
-    return JSON.stringify([
-        { name: 'AI Generated', slug: 'tag/ai-generated' },
-        { name: 'Cosplay', slug: 'tag/cosplay' },
-        { name: 'Japanese', slug: 'tag/jp' },
-        { name: 'MyGirl', slug: 'tag/mygirl' },
-        { name: 'JVAD', slug: 'tag/jvad' },
-        { name: 'Other', slug: 'tag/otherxxx' }
-    ]);
-}
+@dataclass
+class Movie:
+    title: str
+    original_title: str = ""
+    year: str = ""
+    genres: str = ""
+    country: str = ""
+    duration: str = ""
+    rating: str = ""
+    views: str = ""
+    director: str = ""
+    actors: str = ""
+    description: str = ""
+    poster_url: str = ""
+    movie_url: str = ""
+    status: str = ""        # Hoàn tất / Đang chiếu
+    quality: str = ""       # HD, FHD, CAM ...
+    language: str = ""      # Vietsub, Thuyết minh ...
 
-function getFilterConfig() {
-    return JSON.stringify({
-        sort: [
-            { name: 'Mới nhất', value: 'latest' }
-        ],
-        category: [
-            { name: "XIUREN", value: "xiuren" },
-            { name: "XiaoYu", value: "xiaoyu" },
-            { name: "XingYan", value: "xingyan" },
-            { name: "MyGirl", value: "mygirl" },
-            { name: "MFStar", value: "mfstar" }
-        ]
-    });
-}
 
-// =============================================================================
-// URL GENERATION
-// =============================================================================
+class PhimMoiChillScraper:
+    def __init__(self, delay: float = 1.5):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self.delay = delay
 
-function getUrlList(slug, filtersJson) {
-    var filters = JSON.parse(filtersJson || "{}");
-    var page = filters.page || 1;
-    var baseUrl = "https://misskon.com";
+    # ------------------------------------------------------------------ #
+    #  Helper                                                               #
+    # ------------------------------------------------------------------ #
 
-    var path = "";
-    if (filters.category) {
-        path = "/tag/" + filters.category;
-    } else if (slug) {
-        path = "/" + slug;
+    def _get(self, url: str) -> Optional[BeautifulSoup]:
+        try:
+            resp = self.session.get(url, timeout=15)
+            resp.raise_for_status()
+            return BeautifulSoup(resp.text, "html.parser")
+        except requests.RequestException as e:
+            log.error(f"Lỗi khi tải {url}: {e}")
+            return None
+
+    def _text(self, el) -> str:
+        return el.get_text(strip=True) if el else ""
+
+    # ------------------------------------------------------------------ #
+    #  Lấy danh sách phim từ trang liệt kê                                 #
+    # ------------------------------------------------------------------ #
+
+    def get_movie_links_from_listing(self, url: str) -> list[str]:
+        """Trả về danh sách URL chi tiết phim từ 1 trang listing."""
+        soup = self._get(url)
+        if not soup:
+            return []
+
+        links = []
+        # Selector phổ biến trên các site clone PhimMoi
+        for a in soup.select("div.tray-item a, .item a.thumb, .movie-item a, article a.poster"):
+            href = a.get("href", "")
+            if href and "/phim/" in href:
+                full = urljoin(BASE_URL, href)
+                if full not in links:
+                    links.append(full)
+
+        # Fallback: lấy tất cả link chứa /phim/
+        if not links:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "/phim/" in href:
+                    full = urljoin(BASE_URL, href)
+                    if full not in links:
+                        links.append(full)
+
+        log.info(f"  → Tìm thấy {len(links)} phim tại {url}")
+        return links
+
+    def get_all_pages(self, section_url: str, max_pages: int = 5) -> list[str]:
+        """Duyệt qua nhiều trang của 1 chuyên mục và gom link phim."""
+        all_links: list[str] = []
+        for page in range(1, max_pages + 1):
+            page_url = f"{section_url}?page={page}" if page > 1 else section_url
+            log.info(f"Đang cào trang {page}: {page_url}")
+            links = self.get_movie_links_from_listing(page_url)
+            if not links:
+                log.info("  → Hết phim, dừng phân trang.")
+                break
+            all_links.extend(links)
+            time.sleep(self.delay)
+        return list(dict.fromkeys(all_links))  # loại trùng, giữ thứ tự
+
+    # ------------------------------------------------------------------ #
+    #  Cào chi tiết 1 phim                                                  #
+    # ------------------------------------------------------------------ #
+
+    def scrape_movie(self, url: str) -> Optional[Movie]:
+        soup = self._get(url)
+        if not soup:
+            return None
+
+        movie = Movie(title="", movie_url=url)
+
+        # --- Tiêu đề ---
+        title_el = soup.select_one("h1.heading_movie, h1.title, h1")
+        movie.title = self._text(title_el)
+
+        # --- Poster ---
+        poster = soup.select_one("div.poster img, .film-poster img, .thumb img")
+        if poster:
+            movie.poster_url = poster.get("src") or poster.get("data-src", "")
+
+        # --- Block thông tin (dt/dd hoặc li) ---
+        info_map: dict[str, str] = {}
+
+        # Kiểu 1: <ul class="list_info"> với <li>
+        for li in soup.select(".list_info li, .film-info li, .movie-info li"):
+            text = li.get_text(" ", strip=True)
+            if ":" in text:
+                key, _, val = text.partition(":")
+                info_map[key.strip().lower()] = val.strip()
+
+        # Kiểu 2: <div class="row"> chứa label + value
+        for row in soup.select(".info-row, .movie-detail li, .entry-info li"):
+            spans = row.find_all(["span", "b", "strong"])
+            if len(spans) >= 2:
+                key = self._text(spans[0]).lower().rstrip(":")
+                val = self._text(spans[1])
+                info_map[key] = val
+
+        def _pick(*keys: str) -> str:
+            for k in keys:
+                for ik, iv in info_map.items():
+                    if k in ik:
+                        return iv
+            return ""
+
+        movie.original_title = _pick("tên khác", "tên gốc", "original")
+        movie.year           = _pick("năm", "year", "release")
+        movie.genres         = _pick("thể loại", "genre", "category")
+        movie.country        = _pick("quốc gia", "country", "nation")
+        movie.duration       = _pick("thời lượng", "duration", "runtime")
+        movie.director       = _pick("đạo diễn", "director")
+        movie.actors         = _pick("diễn viên", "cast", "actor")
+        movie.status         = _pick("trạng thái", "status")
+        movie.quality        = _pick("chất lượng", "quality")
+        movie.language       = _pick("ngôn ngữ", "language", "vietsub", "thuyết minh")
+        movie.rating         = _pick("điểm", "rating", "imdb", "tmdb")
+        movie.views          = _pick("lượt xem", "view")
+
+        # --- Mô tả ---
+        desc_el = soup.select_one(
+            ".film-content p, .description p, .detail-content p, "
+            "#film-content, .synopsis, .movie-description"
+        )
+        movie.description = self._text(desc_el)
+
+        log.info(f"  ✓ {movie.title or url}")
+        return movie
+
+    # ------------------------------------------------------------------ #
+    #  Cào theo chuyên mục                                                  #
+    # ------------------------------------------------------------------ #
+
+    def scrape_section(self, section_url: str, max_pages: int = 3) -> list[Movie]:
+        """Cào toàn bộ phim trong 1 chuyên mục."""
+        links = self.get_all_pages(section_url, max_pages)
+        movies: list[Movie] = []
+        for i, url in enumerate(links, 1):
+            log.info(f"[{i}/{len(links)}] {url}")
+            movie = self.scrape_movie(url)
+            if movie:
+                movies.append(movie)
+            time.sleep(self.delay)
+        return movies
+
+    # ------------------------------------------------------------------ #
+    #  Xuất dữ liệu                                                         #
+    # ------------------------------------------------------------------ #
+
+    def save_json(self, movies: list[Movie], path: str = "movies.json"):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([asdict(m) for m in movies], f, ensure_ascii=False, indent=2)
+        log.info(f"Đã lưu {len(movies)} phim → {path}")
+
+    def save_csv(self, movies: list[Movie], path: str = "movies.csv"):
+        if not movies:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=asdict(movies[0]).keys())
+            writer.writeheader()
+            writer.writerows(asdict(m) for m in movies)
+        log.info(f"Đã lưu {len(movies)} phim → {path}")
+
+
+# ------------------------------------------------------------------ #
+#  MAIN – chạy thử                                                     #
+# ------------------------------------------------------------------ #
+
+if __name__ == "__main__":
+    scraper = PhimMoiChillScraper(delay=1.5)
+
+    # ---- Tuỳ chỉnh URL chuyên mục ----
+    SECTIONS = {
+        "phim-le":   f"{BASE_URL}/phim-le",       # Phim lẻ
+        "phim-bo":   f"{BASE_URL}/phim-bo",       # Phim bộ
+        "phim-moi":  f"{BASE_URL}/phim-moi-cap-nhat",  # Mới cập nhật
     }
 
-    if (page > 1) {
-        return baseUrl + path + "/page/" + page + "/";
-    }
-    return baseUrl + path + "/";
-}
+    MAX_PAGES = 2   # Số trang mỗi chuyên mục (tăng lên để cào nhiều hơn)
 
-function getUrlSearch(keyword, filtersJson) {
-    var filters = JSON.parse(filtersJson || "{}");
-    var page = filters.page || 1;
-    if (page > 1) {
-        return "https://misskon.com/page/" + page + "/?s=" + encodeURIComponent(keyword);
-    }
-    return "https://misskon.com/?s=" + encodeURIComponent(keyword);
-}
+    all_movies: list[Movie] = []
 
-function getUrlDetail(slug) {
-    if (!slug) return "";
-    if (slug.indexOf("http") === 0) return slug;
-    return "https://misskon.com/" + slug + "/";
-}
+    for name, url in SECTIONS.items():
+        log.info(f"\n{'='*50}")
+        log.info(f"Cào chuyên mục: {name}")
+        log.info(f"{'='*50}")
+        movies = scraper.scrape_section(url, max_pages=MAX_PAGES)
+        all_movies.extend(movies)
 
-function getUrlCategories() { return "https://misskon.com/"; }
-function getUrlCountries() { return ""; }
-function getUrlYears() { return ""; }
-
-// =============================================================================
-// UTILS
-// =============================================================================
-
-var PluginUtils = {
-    cleanText: function (text) {
-        if (!text) return "";
-        return text.replace(/<[^>]*>/g, "")
-            .replace(/&amp;/g, "&")
-            .replace(/&quot;/g, '"')
-            .replace(/&#039;/g, "'")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/\s+/g, " ")
-            .trim();
-    }
-};
-
-// =============================================================================
-// PARSERS
-// =============================================================================
-
-function parseListResponse(html) {
-    var items = [];
-    var foundSlugs = {};
-
-    // Sahifa/TieLabs item structure: article.item-list
-    var itemRegex = /<article[^>]*class="[^"]*item-list[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
-    var match;
-
-    while ((match = itemRegex.exec(html)) !== null) {
-        var itemHtml = match[1];
-
-        // Extract Link and Slug
-        var linkMatch = itemHtml.match(/<h2[^>]*class="[^"]*post-box-title[^"]*"[^>]*>\s*<a[^>]+href="https?:\/\/misskon\.com\/([^"\/]+)\/?"/i) ||
-            itemHtml.match(/<div[^>]*class="post-thumbnail"[^>]*>\s*<a[^>]+href="https?:\/\/misskon\.com\/([^"\/]+)\/?"/i);
-        if (!linkMatch) continue;
-
-        var slug = linkMatch[1];
-        var title = "";
-        var titleM = itemHtml.match(/<h2[^>]*class="[^"]*post-box-title[^"]*"[^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/i);
-        if (titleM) title = PluginUtils.cleanText(titleM[1]);
-
-        var thumb = "";
-        var thumbM = itemHtml.match(/<img[^>]+data-src="([^"]+)"/i) ||
-            itemHtml.match(/<img[^>]+src="([^"]+)"/i);
-        if (thumbM) {
-            thumb = thumbM[1];
-            // If thumb is an SVG placeholder, ignore it and look for data-src
-            if (thumb.indexOf("data:image/svg+xml") !== -1) {
-                var dataSrcM = itemHtml.match(/data-src="([^"]+)"/i);
-                if (dataSrcM) thumb = dataSrcM[1];
-            }
-        }
-
-        if (slug && !foundSlugs[slug]) {
-            items.push({
-                id: slug,
-                title: title,
-                posterUrl: thumb,
-                backdropUrl: thumb,
-                description: "",
-                episode_current: "Gallery",
-                quality: "HD",
-                lang: "China"
-            });
-            foundSlugs[slug] = true;
-        }
-    }
-
-    // Pagination
-    var totalPages = 1;
-    var currentPage = 1;
-
-    var currentMatch = html.match(/<span[^>]*class="current"[^>]*>(\d+)<\/span>/i);
-    if (currentMatch) currentPage = parseInt(currentMatch[1]);
-
-    var pageRegex = /class="page"[^>]*>(\d+)<\/a>/g;
-    var pMatch;
-    while ((pMatch = pageRegex.exec(html)) !== null) {
-        var p = parseInt(pMatch[1]);
-        if (p > totalPages) totalPages = p;
-    }
-
-    return JSON.stringify({
-        items: items,
-        pagination: {
-            currentPage: currentPage,
-            totalPages: totalPages,
-            totalItems: items.length * totalPages,
-            itemsPerPage: items.length
-        }
-    });
-}
-
-function parseSearchResponse(html) {
-    return parseListResponse(html);
-}
-
-function parseMovieDetail(html) {
-    try {
-        var titleMatch = html.match(/<h1[^>]*class="name post-title entry-title"[^>]*>([\s\S]*?)<\/h1>/i) ||
-            html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-        var title = titleMatch ? PluginUtils.cleanText(titleMatch[1]) : "";
-
-        var poster = "";
-        // Try og:image
-        var ogMatch = html.match(/<meta property="og:image" content="([^"]+)"/i);
-        if (ogMatch) {
-            poster = ogMatch[1];
-        } else {
-            // Try twitter:image
-            var twMatch = html.match(/<meta name="twitter:image" content="([^"]+)"/i);
-            if (twMatch) {
-                poster = twMatch[1];
-            } else {
-                // Try to find in LD+JSON or schema
-                var schemaMatch = html.match(/"image":\s*\{\s*"@type":\s*"ImageObject",\s*"url":\s*"([^"]+)"/i) ||
-                    html.match(/"image":\s*"([^"]+)"/i);
-                if (schemaMatch) {
-                    poster = schemaMatch[1].replace(/\\/g, "");
-                } else {
-                    // Final fallback: use the first content image from the whole page
-                    var firstImgMatch = html.match(/<img[^>]+(?:data-src|src)="([^"]+(?:pok\.misskon\.com|\/media\/)[^"]+)"/i);
-                    if (firstImgMatch) poster = firstImgMatch[1];
-                }
-            }
-        }
-
-        // Chapters - handle post pagination
-        var channels = [];
-        // Page 1
-        var currentUrlM = html.match(/<link rel="canonical" href="([^"]+)"/i);
-        var baseUrl = currentUrlM ? currentUrlM[1].replace(/\/$/, "") : "";
-
-        // Find other pages
-        var pages = [{ id: baseUrl + "/", name: "Trang 1", slug: "1" }];
-        var pageRegex = /<a[^>]+href="([^"]+)"[^>]*class="post-page-numbers"[^>]*>(\d+)<\/a>/gi;
-        var pm;
-        var seenPages = { "1": true };
-
-        while ((pm = pageRegex.exec(html)) !== null) {
-            var pUrl = pm[1];
-            var pNum = pm[2];
-            if (!seenPages[pNum]) {
-                pages.push({
-                    id: pUrl,
-                    name: "Trang " + pNum,
-                    slug: pNum
-                });
-                seenPages[pNum] = true;
-            }
-        }
-
-        // Sort pages just in case
-        pages.sort(function (a, b) { return parseInt(a.slug) - parseInt(b.slug); });
-
-        var servers = [{
-            name: "Default",
-            episodes: pages
-        }];
-
-        return JSON.stringify({
-            id: "",
-            title: title,
-            posterUrl: poster,
-            backdropUrl: poster,
-            description: "",
-            servers: servers,
-            category: "Gallery, Model",
-            status: "Thành công",
-            quality: "HD",
-            lang: "China"
-        });
-
-    } catch (e) {
-        return "null";
-    }
-}
-
-function parseDetailResponse(html) {
-    try {
-        var images = [];
-
-        // 1. Target the main article block
-        var articleMatch = html.match(/<article[^>]*id="the-post"[^>]*>([\s\S]*?)<\/article>/i);
-        var contentHtml = articleMatch ? articleMatch[1] : html;
-
-        // 2. Remove YARPP (related posts) section
-        contentHtml = contentHtml.replace(/<div[^>]*class="[^"]*yarpp-related[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi, "");
-        contentHtml = contentHtml.replace(/<div[^>]*class="[^"]*yarpp-related[^"]*"[^>]*>([\s\S]*?)<\/div>/gi, "");
-
-        // 3. Scan for content images in the filtered block
-        var imgTagRegex = /<img[^>]+>/gi;
-        var tagMatch;
-        while ((tagMatch = imgTagRegex.exec(contentHtml)) !== null) {
-            var tagHtml = tagMatch[0];
-
-            // Prioritize data-src over src for lazyload
-            var urlMatch = tagHtml.match(/data-src="([^"]+)"/i) || tagHtml.match(/src="([^"]+)"/i);
-            if (urlMatch) {
-                var url = urlMatch[1];
-
-                // Content images on MissKon usually reside in pok.misskon.com or /media/
-                var isContentImg = url.indexOf("pok.misskon.com") !== -1 ||
-                    url.indexOf("/media/") !== -1;
-
-                // Exclude obvious non-content images
-                var isGarbage = url.indexOf("data:image/svg+xml") !== -1 ||
-                    url.indexOf("misskon.ico") !== -1 ||
-                    url.indexOf("ads") !== -1 ||
-                    url.indexOf("ad-provider") !== -1 ||
-                    url.indexOf("gravatar") !== -1;
-
-                if (isContentImg && !isGarbage) {
-                    if (images.indexOf(url) === -1) {
-                        images.push(url);
-                    }
-                }
-            }
-        }
-
-        return JSON.stringify({
-            images: images,
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://misskon.com/"
-            }
-        });
-    } catch (e) {
-        return "{}";
-    }
-}
-
-function parseCategoriesResponse(html) {
-    return JSON.stringify([
-        { name: 'XIUREN', slug: 'tag/xiuren' },
-        { name: 'XiaoYu', slug: 'tag/xiaoyu' },
-        { name: 'XingYan', slug: 'tag/xingyan' },
-        { name: 'MFStar', slug: 'tag/mfstar' },
-        { name: 'MyGirl', slug: 'tag/mygirl' }
-    ]);
-}
-
-function parseCountriesResponse(html) { return "[]"; }
-function parseYearsResponse(html) { return "[]"; }
+    # Lưu kết quả
+    scraper.save_json(all_movies, "movies.json")
+    scraper.save_csv(all_movies, "movies.csv")
+    log.info(f"\nTổng cộng: {len(all_movies)} phim đã cào.")
