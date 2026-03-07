@@ -75,7 +75,7 @@
             "id": "misskon",
             "name": "MissKon",
             "version": "1.0.0",
-            "scriptUrl": "https://raw.githubusercontent.com/Chungchuyen/repo/refs/heads/main/plugins/misskon_plugin.js",
+            "scriptUrl": "https://raw.githubusercontent.com/Chungchuyen/repo/main/plugins/misskon_plugin.js",
             "iconUrl": "https://misskon.com/favicon.ico"
         },
         {
